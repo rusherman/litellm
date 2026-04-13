@@ -1,0 +1,99 @@
+name: Build Patched Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Base version tag (e.g. v1.82.3-stable). Leave empty to use latest upstream stable tag."
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*-patched"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version tag
+        id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          GIT_REF: ${{ github.ref }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            echo "tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+          elif [[ "$GIT_REF" == refs/tags/* ]]; then
+            TAG="${GIT_REF#refs/tags/}"
+            TAG="${TAG%-patched}"
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          else
+            git fetch --tags https://github.com/BerriAI/litellm.git
+            LATEST_TAG=$(git tag -l "v*-stable" --sort=-creatordate | head -1)
+            echo "tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.tag }}-patched
+            type=raw,value=latest-patched,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            LITELLM_BUILD_IMAGE=cgr.dev/chainguard/wolfi-base
+            LITELLM_RUNTIME_IMAGE=cgr.dev/chainguard/wolfi-base
+
+      - name: Summary
+        env:
+          BASE_VERSION: ${{ steps.version.outputs.tag }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          echo "## Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Base version:** ${BASE_VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Image tags:**" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${IMAGE_TAGS}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Patches applied:**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- DashScope cache_control preservation ([#18165](https://github.com/BerriAI/litellm/issues/18165))" >> "$GITHUB_STEP_SUMMARY"
